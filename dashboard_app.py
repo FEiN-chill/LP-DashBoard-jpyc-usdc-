@@ -29,7 +29,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_settings():
     try:
         # ttl=0 でキャッシュを無効化し、常に最新を読み込む
-        df = conn.read(worksheet="settings", ttl=0)
+        df = conn.read(worksheet="settings", ttl=600)
         df = df.dropna(subset=['key'])
         s_dict = dict(zip(df['key'], df['value']))
         # 数値型に変換
@@ -52,7 +52,7 @@ phase_start_date = pd.to_datetime(settings.get("PHASE_START_DATE", datetime.now(
 # --- 履歴の読み書き関数 ---
 def load_history():
     try:
-        df = conn.read(worksheet="history", ttl=0)
+        df = conn.read(worksheet="history", ttl=600)
         df = df.dropna(how="all")
         if not df.empty and 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
