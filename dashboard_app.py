@@ -3,14 +3,16 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+# --- JST（日本標準時）の設定 ---
+JST = timezone(timedelta(hours=+9), 'JST')
 
 # ==========================================
 # 1. 基本設定とクラウドDB接続
 # ==========================================
 st.set_page_config(page_title="Uniswap LP DashBoard", layout="wide", page_icon="⚡")
 
-# UIカスタマイズCSS
 st.markdown("""
     <style>
     .block-container { padding-top: 1rem; padding-bottom: 0rem; }
@@ -23,33 +25,29 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- スプレッドシート接続の確立 ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_settings():
     try:
-        # ttl=0 でキャッシュを無効化し、常に最新を読み込む
         df = conn.read(worksheet="settings", ttl=600)
         df = df.dropna(subset=['key'])
         s_dict = dict(zip(df['key'], df['value']))
-        # 数値型に変換
         for k in ["INITIAL_USDC", "INITIAL_JPYC", "RANGE_UPPER", "RANGE_LOWER", "CARRYOVER_PROFIT", "CARRYOVER_FEES"]:
             s_dict[k] = float(s_dict.get(k, 0))
         return s_dict
     except Exception as e:
         st.error(f"設定の読み込みエラー: {e}")
-        return {"INITIAL_USDC": 500.0, "INITIAL_JPYC": 80000.0, "RANGE_UPPER": 170.0, "RANGE_LOWER": 150.0, "CARRYOVER_PROFIT": 0.0, "CARRYOVER_FEES": 0.0, "BASE_DATE": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "PHASE_START_DATE": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        return {"INITIAL_USDC": 500.0, "INITIAL_JPYC": 80000.0, "RANGE_UPPER": 170.0, "RANGE_LOWER": 150.0, "CARRYOVER_PROFIT": 0.0, "CARRYOVER_FEES": 0.0, "BASE_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"), "PHASE_START_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")}
 
 def save_settings(settings_dict):
     df = pd.DataFrame(list(settings_dict.items()), columns=['key', 'value'])
     conn.update(worksheet="settings", data=df)
-    st.cache_data.clear() # キャッシュクリア
+    st.cache_data.clear()
 
 settings = load_settings()
-base_date = pd.to_datetime(settings.get("BASE_DATE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-phase_start_date = pd.to_datetime(settings.get("PHASE_START_DATE", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+base_date = pd.to_datetime(settings.get("BASE_DATE", datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")))
+phase_start_date = pd.to_datetime(settings.get("PHASE_START_DATE", datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")))
 
-# --- 履歴の読み書き関数 ---
 def load_history():
     try:
         df = conn.read(worksheet="history", ttl=600)
@@ -70,7 +68,6 @@ def save_history(new_df):
     conn.update(worksheet="history", data=df_combined)
     st.cache_data.clear()
 
-# --- カスタムカード生成関数 ---
 def create_card(title, value, sub_html=""):
     return f"""
     <div style="
@@ -86,7 +83,7 @@ def create_card(title, value, sub_html=""):
     """
 
 # ==========================================
-# 2. 画面レイアウト分割（左:ダッシュボード / 右:操作パネル）
+# 2. 画面レイアウト分割
 # ==========================================
 col_main, col_right = st.columns([3, 1], gap="large")
 
@@ -108,8 +105,9 @@ with col_right:
             save_lp_val = current_usdc + (calculated_jpyc / live_rate)
             save_net_profit = (save_lp_val - save_hold_val) + earned_fees + settings["CARRYOVER_PROFIT"]
             
+            # 修正：記録時間をJSTで取得
             new_data = pd.DataFrame([{
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "date": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
                 "rate": live_rate, "usdc": current_usdc, "jpyc": calculated_jpyc,
                 "fees": earned_fees, "hold_val_usd": save_hold_val,
                 "lp_val_usd": save_lp_val, "net_profit_usd": save_net_profit
@@ -128,12 +126,13 @@ with col_right:
         n_usdc = st.number_input("初期 USDC", value=settings["INITIAL_USDC"], key="i_u")
         n_jpyc = st.number_input("初期 JPYC", value=settings["INITIAL_JPYC"], key="i_j")
         if st.button("🚀 新規スタート", use_container_width=True):
+            # 修正：リセット時間をJSTで取得
             settings.update({"INITIAL_USDC": n_usdc, "INITIAL_JPYC": n_jpyc, "RANGE_UPPER": n_up, "RANGE_LOWER": n_low, 
-                             "CARRYOVER_PROFIT": 0, "CARRYOVER_FEES": 0, "BASE_DATE": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                             "PHASE_START_DATE": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                             "CARRYOVER_PROFIT": 0, "CARRYOVER_FEES": 0, 
+                             "BASE_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+                             "PHASE_START_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")})
             with st.spinner('設定を更新中...'):
                 save_settings(settings)
-                # 履歴のクリア（空のDataFrameで上書き）
                 conn.update(worksheet="history", data=pd.DataFrame(columns=['date', 'rate', 'usdc', 'jpyc', 'fees', 'hold_val_usd', 'lp_val_usd', 'net_profit_usd']))
                 st.cache_data.clear()
             st.rerun()
@@ -143,8 +142,9 @@ with col_right:
         a_usdc = st.number_input("追加後の合計 USDC", value=settings["INITIAL_USDC"], key="a_u")
         a_jpyc = st.number_input("追加後の合計 JPYC", value=settings["INITIAL_JPYC"], key="a_j")
         if st.button("➕ 資金追加を反映", use_container_width=True):
+            # 修正：追加時間をJSTで取得
             settings.update({"INITIAL_USDC": a_usdc, "INITIAL_JPYC": a_jpyc, 
-                             "PHASE_START_DATE": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                             "PHASE_START_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")})
             with st.spinner('設定を更新中...'):
                 save_settings(settings)
             st.rerun()
@@ -158,10 +158,11 @@ with col_right:
         r_profit = st.number_input("今回の確定利益 ($)", value=0.0, key="r_p")
         r_fee = st.number_input("今回回収した手数料 ($)", value=0.0, key="r_f")
         if st.button("🔄 再構築を反映", use_container_width=True):
+            # 修正：再構築時間をJSTで取得
             settings["CARRYOVER_PROFIT"] += r_profit
             settings["CARRYOVER_FEES"] += r_fee
             settings.update({"INITIAL_USDC": r_usdc, "INITIAL_JPYC": r_jpyc, "RANGE_UPPER": r_up, "RANGE_LOWER": r_low,
-                             "PHASE_START_DATE": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                             "PHASE_START_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")})
             with st.spinner('設定を更新中...'):
                 save_settings(settings)
             st.rerun()
@@ -250,9 +251,11 @@ with col_main:
             tab_trend, tab_daily = st.tabs(["📈 累積トレンド", "📊 日別モメンタム"])
             
             with tab_trend:
+                # 日付順にソートしてグラフの逆走を防止
+                df_plot = df_history.sort_values('date').copy()
                 fig1 = go.Figure()
-                fig1.add_trace(go.Scatter(x=df_history['date'], y=df_history['net_profit_usd'], mode='lines+markers', name='実質利益 (IL込)', line=dict(color="#00E676", width=2), marker=dict(symbol='circle', size=6, line=dict(width=1, color='white')), fill='tozeroy', fillcolor='rgba(0, 230, 118, 0.1)'))
-                fig1.add_trace(go.Scatter(x=df_history['date'], y=df_history['fees'], mode='lines+markers', name='累積獲得手数料', line=dict(color="#00B0FF", width=2), marker=dict(symbol='circle', size=6, line=dict(width=1, color='white')), fill='tozeroy', fillcolor='rgba(0, 176, 255, 0.1)'))
+                fig1.add_trace(go.Scatter(x=df_plot['date'], y=df_plot['net_profit_usd'], mode='lines+markers', name='実質利益 (IL込)', line=dict(color="#00E676", width=2), marker=dict(symbol='circle', size=6, line=dict(width=1, color='white')), fill='tozeroy', fillcolor='rgba(0, 230, 118, 0.1)'))
+                fig1.add_trace(go.Scatter(x=df_plot['date'], y=df_plot['fees'], mode='lines+markers', name='累積獲得手数料', line=dict(color="#00B0FF", width=2), marker=dict(symbol='circle', size=6, line=dict(width=1, color='white')), fill='tozeroy', fillcolor='rgba(0, 176, 255, 0.1)'))
                 fig1.update_layout(template="plotly_dark", margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), hovermode="x unified")
                 st.plotly_chart(fig1, use_container_width=True)
             
