@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
+import requests
 
 # --- JST（日本標準時）の設定 ---
 JST = timezone(timedelta(hours=+9), 'JST')
@@ -36,7 +37,6 @@ def load_settings():
             s_dict[k] = float(s_dict.get(k, 0))
         return s_dict
     except Exception as e:
-        st.error(f"設定の読み込みエラー: {e}")
         return {"INITIAL_USDC": 500.0, "INITIAL_JPYC": 80000.0, "RANGE_UPPER": 170.0, "RANGE_LOWER": 150.0, "CARRYOVER_PROFIT": 0.0, "CARRYOVER_FEES": 0.0, "BASE_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"), "PHASE_START_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")}
 
 def save_settings(settings_dict):
@@ -82,6 +82,41 @@ def create_card(title, value, sub_html=""):
     <br>
     """
 
+# --- API自動取得エンジン ---
+def fetch_blockchain_data():
+    try:
+        api_key = st.secrets["api"]["POLYGONSCAN_API_KEY"]
+        wallet = st.secrets["api"]["WALLET_ADDRESS"]
+        
+        # 1. CoinGeckoで最新レートを取得
+        cg_url = "https://api.coingecko.com/api/v3/simple/price?ids=jpy-coin-v2&vs_currencies=usd"
+        res_cg = requests.get(cg_url).json()
+        jpyc_usd_price = res_cg.get("jpy-coin-v2", {}).get("usd", 0.00625)
+        live_rate = 1 / jpyc_usd_price if jpyc_usd_price > 0 else 160.0
+
+        # 2. PolygonscanでUSDC(Bridged)の残高を取得
+        usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        usdc_url = f"https://api.polygonscan.com/api?module=account&action=tokenbalance&contractaddress={usdc_contract}&address={wallet}&tag=latest&apikey={api_key}"
+        res_usdc = requests.get(usdc_url).json()
+        usdc_bal = float(res_usdc.get("result", 0)) / 1e6
+
+        # 3. PolygonscanでJPYCの残高を取得
+        jpyc_contract = "0x431D5dfF03120AFA4bDf332c61A6e1766eF37BDB"
+        jpyc_url = f"https://api.polygonscan.com/api?module=account&action=tokenbalance&contractaddress={jpyc_contract}&address={wallet}&tag=latest&apikey={api_key}"
+        res_jpyc = requests.get(jpyc_url).json()
+        jpyc_bal = float(res_jpyc.get("result", 0)) / 1e18
+        jpyc_usd_val = jpyc_bal / live_rate
+
+        return live_rate, usdc_bal, jpyc_usd_val
+    except Exception as e:
+        st.error(f"API取得エラー: {e}")
+        return None, None, None
+
+# --- Session State（入力フォームの記憶）初期化 ---
+if 'in_rate' not in st.session_state: st.session_state.in_rate = 159.517
+if 'in_usdc' not in st.session_state: st.session_state.in_usdc = 467.54
+if 'in_jpyc_usd' not in st.session_state: st.session_state.in_jpyc_usd = 551.89
+
 # ==========================================
 # 2. 画面レイアウト分割
 # ==========================================
@@ -91,11 +126,27 @@ col_main, col_right = st.columns([3, 1], gap="large")
 # 3. 【右側】操作パネル
 # ==========================================
 with col_right:
+    st.markdown("### 🤖 AUTO FETCH")
+    if st.button("🔄 最新データを自動取得", use_container_width=True):
+        with st.spinner("ブロックチェーンと通信中..."):
+            fetched_rate, fetched_usdc, fetched_jpyc_usd = fetch_blockchain_data()
+            if fetched_rate:
+                st.session_state.in_rate = fetched_rate
+                st.session_state.in_usdc = fetched_usdc
+                st.session_state.in_jpyc_usd = fetched_jpyc_usd
+                st.success("✅ 取得成功！下に自動入力されました。")
+
     st.markdown("### 📝 RECORD DATA")
     with st.container(border=True):
-        live_rate = st.number_input("現在レート (1 USDC = ? JPYC)", value=159.517, format="%.3f")
-        current_usdc = st.number_input("現在 USDC 残高", value=467.54, step=10.0)
-        jpyc_usd_val = st.number_input("現在 JPYC 残高 ($表示)", value=551.89, step=10.0)
+        live_rate = st.number_input("現在レート (1 USDC = ? JPYC)", value=st.session_state.in_rate, format="%.3f", key="ui_rate")
+        current_usdc = st.number_input("現在 USDC 残高", value=st.session_state.in_usdc, step=10.0, key="ui_usdc")
+        jpyc_usd_val = st.number_input("現在 JPYC 残高 ($表示)", value=st.session_state.in_jpyc_usd, step=10.0, key="ui_jpyc")
+        
+        # ユーザーがUIで変更した場合、Session Stateを更新
+        st.session_state.in_rate = live_rate
+        st.session_state.in_usdc = current_usdc
+        st.session_state.in_jpyc_usd = jpyc_usd_val
+
         calculated_jpyc = jpyc_usd_val * live_rate
         st.caption(f"↳ {calculated_jpyc:,.0f} JPYC")
         earned_fees = st.number_input("今フェーズの累計手数料 ($)", value=0.01, step=1.0)
@@ -105,7 +156,6 @@ with col_right:
             save_lp_val = current_usdc + (calculated_jpyc / live_rate)
             save_net_profit = (save_lp_val - save_hold_val) + earned_fees + settings["CARRYOVER_PROFIT"]
             
-            # 修正：記録時間をJSTで取得
             new_data = pd.DataFrame([{
                 "date": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
                 "rate": live_rate, "usdc": current_usdc, "jpyc": calculated_jpyc,
@@ -126,7 +176,6 @@ with col_right:
         n_usdc = st.number_input("初期 USDC", value=settings["INITIAL_USDC"], key="i_u")
         n_jpyc = st.number_input("初期 JPYC", value=settings["INITIAL_JPYC"], key="i_j")
         if st.button("🚀 新規スタート", use_container_width=True):
-            # 修正：リセット時間をJSTで取得
             settings.update({"INITIAL_USDC": n_usdc, "INITIAL_JPYC": n_jpyc, "RANGE_UPPER": n_up, "RANGE_LOWER": n_low, 
                              "CARRYOVER_PROFIT": 0, "CARRYOVER_FEES": 0, 
                              "BASE_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
@@ -142,7 +191,6 @@ with col_right:
         a_usdc = st.number_input("追加後の合計 USDC", value=settings["INITIAL_USDC"], key="a_u")
         a_jpyc = st.number_input("追加後の合計 JPYC", value=settings["INITIAL_JPYC"], key="a_j")
         if st.button("➕ 資金追加を反映", use_container_width=True):
-            # 修正：追加時間をJSTで取得
             settings.update({"INITIAL_USDC": a_usdc, "INITIAL_JPYC": a_jpyc, 
                              "PHASE_START_DATE": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")})
             with st.spinner('設定を更新中...'):
@@ -158,7 +206,6 @@ with col_right:
         r_profit = st.number_input("今回の確定利益 ($)", value=0.0, key="r_p")
         r_fee = st.number_input("今回回収した手数料 ($)", value=0.0, key="r_f")
         if st.button("🔄 再構築を反映", use_container_width=True):
-            # 修正：再構築時間をJSTで取得
             settings["CARRYOVER_PROFIT"] += r_profit
             settings["CARRYOVER_FEES"] += r_fee
             settings.update({"INITIAL_USDC": r_usdc, "INITIAL_JPYC": r_jpyc, "RANGE_UPPER": r_up, "RANGE_LOWER": r_low,
@@ -213,7 +260,6 @@ with col_main:
             base_capital_usd = latest.get('hold_val_usd', settings["INITIAL_USDC"] + settings["INITIAL_JPYC"]/160)
             if base_capital_usd > 0: apr_pct = (fee_avg_24h * 365 / base_capital_usd) * 100
 
-            # --- OVERVIEW ---
             st.subheader("OVERVIEW")
             dist_up = range_up - current_rate
             dist_low = current_rate - range_low
@@ -238,7 +284,6 @@ with col_main:
             with c3: st.markdown(create_card("実質利益 (IL込)", f"$ {latest['net_profit_usd']:.2f}", " "), unsafe_allow_html=True)
             with c4: st.markdown(create_card("累積獲得手数料", f"$ {latest['fees']:.2f}", " "), unsafe_allow_html=True)
 
-            # --- PERFORMANCE ---
             st.subheader("PERFORMANCE METRICS")
             p1, p2, p3, p4 = st.columns(4)
             with p1: st.markdown(create_card("今フェーズ 24h平均", f"$ {fee_avg_24h:.2f}", " "), unsafe_allow_html=True)
@@ -246,12 +291,10 @@ with col_main:
             with p3: st.markdown(create_card("30日 着地予想", f"$ {projected_30d:.2f}", " "), unsafe_allow_html=True)
             with p4: st.markdown(create_card("年換算 APR", f"{apr_pct:.1f} %", " "), unsafe_allow_html=True)
 
-            # --- ANALYTICS ---
             st.subheader("ANALYTICS")
             tab_trend, tab_daily = st.tabs(["📈 累積トレンド", "📊 日別モメンタム"])
             
             with tab_trend:
-                # 日付順にソートしてグラフの逆走を防止
                 df_plot = df_history.sort_values('date').copy()
                 fig1 = go.Figure()
                 fig1.add_trace(go.Scatter(x=df_plot['date'], y=df_plot['net_profit_usd'], mode='lines+markers', name='実質利益 (IL込)', line=dict(color="#00E676", width=2), marker=dict(symbol='circle', size=6, line=dict(width=1, color='white')), fill='tozeroy', fillcolor='rgba(0, 230, 118, 0.1)'))
